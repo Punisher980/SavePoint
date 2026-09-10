@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version_label:
-        description: "Nome do APK (ex.: teste, v1.0.3)"
+        description: "Nome do APK (ex.: teste, v1.0.5)"
         required: false
-        default: "v1.0.3"
+        default: "v1.0.5"
         type: string
 
 permissions:
@@ -66,12 +66,20 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Projeto encontrado em: $PROJECT_DIR"
 
-      - name: Mostrar versões
+      - name: Verificar configuração JVM 17
         shell: bash
         run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          echo "Java usado pelo runner:"
           java -version
-          gradle --version
-          sdkmanager --list_installed | grep -E "platforms;android-35|build-tools;35.0.0" || true
+          echo ""
+          echo "Trechos JVM do app/build.gradle.kts:"
+          grep -nE "VERSION_17|jvmToolchain|jvmTarget|sourceCompatibility|targetCompatibility" app/build.gradle.kts || true
+          echo ""
+          if ! grep -q "VERSION_17" app/build.gradle.kts; then
+            echo "AVISO: app/build.gradle.kts parece antigo. O guard de CI vai forçar Java 17 mesmo assim."
+          fi
 
       - name: Gerar APK Debug
         id: build
@@ -79,7 +87,20 @@ jobs:
         run: |
           set +e
           cd "$PROJECT_DIR"
-          gradle :app:assembleDebug \
+
+          # Cria um init script no runner também, assim a correção funciona mesmo
+          # caso o arquivo ci-jvm17.init.gradle ainda não tenha sido enviado ao repo.
+          cat > "$RUNNER_TEMP/savepoint-jvm17.init.gradle" <<'GRADLE'
+          allprojects {
+              tasks.withType(org.gradle.api.tasks.compile.JavaCompile).configureEach {
+                  sourceCompatibility = "17"
+                  targetCompatibility = "17"
+              }
+          }
+          GRADLE
+
+          gradle :app:clean :app:assembleDebug \
+            --init-script "$RUNNER_TEMP/savepoint-jvm17.init.gradle" \
             --no-daemon \
             --stacktrace \
             --console=plain \
@@ -89,7 +110,7 @@ jobs:
           if [ "$CODE" -ne 0 ]; then
             echo ""
             echo "================ ERRO PRINCIPAL ================"
-            grep -nE "(^e: |^FAILURE:|^\* What went wrong:|^Caused by:|error: |ERROR:|Could not |A problem occurred|SDK location|requires Gradle|Unresolved reference)" build.log | head -120 || true
+            grep -nE "(^e: |^FAILURE:|^\* What went wrong:|^Caused by:|error: |ERROR:|Could not |A problem occurred|SDK location|requires Gradle|Unresolved reference|Inconsistent JVM-target)" build.log | head -160 || true
             echo "================================================"
             exit "$CODE"
           fi
@@ -117,7 +138,7 @@ jobs:
 
           LABEL="${{ inputs.version_label }}"
           SAFE_LABEL=$(printf '%s' "$LABEL" | tr ' /' '--' | tr -cd '[:alnum:]._-')
-          [ -z "$SAFE_LABEL" ] && SAFE_LABEL="v1.0.3"
+          [ -z "$SAFE_LABEL" ] && SAFE_LABEL="v1.0.5"
 
           mkdir -p artifacts
           cp "$APK" "artifacts/Savepoint-${SAFE_LABEL}.apk"
