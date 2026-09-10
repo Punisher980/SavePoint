@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+set -e
+if command -v gradle >/dev/null 2>&1; then
+  exec gradle "$@"
+fi
+echo "Gradle não encontrado. Abra o projeto no Android Studio ou instale Gradle 8.10.2."
+exit 1
