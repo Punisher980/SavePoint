@@ -1,0 +1,136 @@
+name: Savepoint - Gerar APK manualmente
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_label:
+        description: "Nome do APK (ex.: teste, v1.0.3)"
+        required: false
+        default: "v1.0.3"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "17"
+  GRADLE_VERSION: "8.10.2"
+
+jobs:
+  build-apk:
+    name: Compilar APK do Savepoint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Instalar Android 35
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Configurar Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Localizar projeto Android
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
+            PROJECT_DIR="."
+          elif [ -f savepoint-app/settings.gradle.kts ] || [ -f savepoint-app/settings.gradle ]; then
+            PROJECT_DIR="savepoint-app"
+          else
+            SETTINGS_FILE=$(find . -maxdepth 4 -type f \( -name settings.gradle.kts -o -name settings.gradle \) -print -quit)
+            if [ -z "${SETTINGS_FILE:-}" ]; then
+              echo "ERRO: settings.gradle(.kts) não encontrado."
+              find . -maxdepth 3 -type f | sort | head -150
+              exit 1
+            fi
+            PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Projeto encontrado em: $PROJECT_DIR"
+
+      - name: Mostrar versões
+        shell: bash
+        run: |
+          java -version
+          gradle --version
+          sdkmanager --list_installed | grep -E "platforms;android-35|build-tools;35.0.0" || true
+
+      - name: Gerar APK Debug
+        id: build
+        shell: bash
+        run: |
+          set +e
+          cd "$PROJECT_DIR"
+          gradle :app:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --console=plain \
+            2>&1 | tee build.log
+          CODE=${PIPESTATUS[0]}
+
+          if [ "$CODE" -ne 0 ]; then
+            echo ""
+            echo "================ ERRO PRINCIPAL ================"
+            grep -nE "(^e: |^FAILURE:|^\* What went wrong:|^Caused by:|error: |ERROR:|Could not |A problem occurred|SDK location|requires Gradle|Unresolved reference)" build.log | head -120 || true
+            echo "================================================"
+            exit "$CODE"
+          fi
+
+      - name: Publicar log de compilação
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Savepoint-build-log
+          path: ${{ env.PROJECT_DIR }}/build.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Preparar APK
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk/debug" -maxdepth 1 -type f -name "*.apk" -print -quit)
+          if [ -z "${APK:-}" ] || [ ! -f "$APK" ]; then
+            echo "ERRO: APK não encontrado."
+            find "$PROJECT_DIR/app/build/outputs" -maxdepth 5 -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          LABEL="${{ inputs.version_label }}"
+          SAFE_LABEL=$(printf '%s' "$LABEL" | tr ' /' '--' | tr -cd '[:alnum:]._-')
+          [ -z "$SAFE_LABEL" ] && SAFE_LABEL="v1.0.3"
+
+          mkdir -p artifacts
+          cp "$APK" "artifacts/Savepoint-${SAFE_LABEL}.apk"
+          sha256sum "artifacts/Savepoint-${SAFE_LABEL}.apk" > "artifacts/Savepoint-${SAFE_LABEL}.apk.sha256"
+          ls -lh artifacts
+
+      - name: Publicar APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Savepoint-${{ inputs.version_label }}-APK
+          path: |
+            artifacts/*.apk
+            artifacts/*.sha256
+          if-no-files-found: error
+          retention-days: 30
